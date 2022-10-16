@@ -42,6 +42,8 @@ namespace SteveSyrell.PurpleAirUploadApi
                     await hourlyAveragesTableClient.AddEntityAsync(average);
                 }
             }
+
+            log.LogInformation($"[Averager] Completed calculating averages in {(DateTime.UtcNow - now).TotalMilliseconds}ms");
         }
 
         private async Task<List<AverageTableEntity>> CalculateAveragesAsync(AsyncPageable<SensorDataTableEntity> query)

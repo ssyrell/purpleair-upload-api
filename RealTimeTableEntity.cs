@@ -6,7 +6,7 @@ using Azure.Data.Tables;
 
 namespace SteveSyrell.PurpleAirUploadApi
 {
-    public record SensorDataTableEntity : ITableEntity
+    public record RealTimeTableEntity : ITableEntity
     {
         public string PartitionKey { get; set; }
 
@@ -17,9 +17,7 @@ namespace SteveSyrell.PurpleAirUploadApi
         public DateTimeOffset? Timestamp { get; set; } = default!;
 
         public string SensorId { get; set; }
-
         public string DateTime { get; set; }
-
         public string Geo { get; set; }
 
         [JsonPropertyName("Mem")]

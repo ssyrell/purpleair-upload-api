@@ -5,84 +5,126 @@ using Azure;
 using Azure.Data.Tables;
 using Microsoft.Azure.WebJobs;
 using Microsoft.Extensions.Logging;
-
+using Microsoft.WindowsAzure.Storage.Table;
 
 namespace SteveSyrell.PurpleAirUploadApi
 {
     public class Averager
     {
+        /// <summary>
+        /// Function to calculate averages of real-time data uploaded from purple air sensors.
+        /// Function is invoked every 10 minutes and calculates averages of various windows 
+        /// depending on the current time.
+        /// </summary>
+        /// <param name="myTimer"></param>
+        /// <param name="log"></param>
+        /// <returns></returns>
         [FunctionName("Averager")]
         public async Task Run([TimerTrigger("0 */10 * * * *")] TimerInfo myTimer, ILogger log)
         {
-            var now = DateTime.UtcNow;
-            var isOnTheHour = now.Minute == 0;
-            log.LogInformation($"[Averager] Invoking at {now}.");
+            var thresholds = this.GetThresholds();
+            log.LogInformation($"[Averager] Calculating averages from {thresholds.End} to {thresholds.Start}.");
 
             TableServiceClient tableServiceClient = new TableServiceClient(Environment.GetEnvironmentVariable("STORAGE_ACCOUNT_CONNECTION_STRING"));
-            TableClient historyTableClient = tableServiceClient.GetTableClient(Environment.GetEnvironmentVariable("STORAGE_ACCOUNT_TABLE_NAME"));
-
-            var tenMinQuery = historyTableClient.QueryAsync<SensorDataTableEntity>(x => x.Timestamp >= DateTimeOffset.UtcNow.AddMinutes(-10));
-            var tenMinAverages = await this.CalculateAveragesAsync(tenMinQuery);
-
-
-            TableClient tenMinAveragesTableClient = tableServiceClient.GetTableClient(Environment.GetEnvironmentVariable("STORAGE_ACCOUNT_TEN_MINUTE_AVERAGES_TABLE_NAME"));
-            foreach (var average in tenMinAverages)
-            {
-                await tenMinAveragesTableClient.AddEntityAsync(average);
-            }
-
-            if (isOnTheHour)
-            {
-                log.LogInformation("[Averager] Generating hourly averages, as this invocation occurs on the hour");
-                var hourQuery = historyTableClient.QueryAsync<SensorDataTableEntity>(x => x.Timestamp >= DateTimeOffset.UtcNow.AddMinutes(-60));
-                var hourlyAverages = (await this.CalculateAveragesAsync(hourQuery));
-                TableClient hourlyAveragesTableClient = tableServiceClient.GetTableClient(Environment.GetEnvironmentVariable("STORAGE_ACCOUNT_HOURLY_AVERAGES_TABLE_NAME"));
-                foreach (var average in hourlyAverages)
-                {
-                    await hourlyAveragesTableClient.AddEntityAsync(average);
-                }
-            }
-
-            log.LogInformation($"[Averager] Completed calculating averages in {(DateTime.UtcNow - now).TotalMilliseconds}ms");
+            await this.CalculateAveragesAsync(tableServiceClient, thresholds, log);
         }
 
-        private async Task<List<AverageTableEntity>> CalculateAveragesAsync(AsyncPageable<SensorDataTableEntity> query)
+        private Thresholds GetThresholds()
         {
-            var results = new List<AverageTableEntity>();
-            AverageTableEntity currentSensorAverages = null;
-            var sensorEntryCount = 0;
-            await foreach (var row in query)
+            var now = DateTimeOffset.UtcNow;
+            var thresholds = new Thresholds
             {
-                if (currentSensorAverages == null)
+                Start = new DateTimeOffset(now.Year, now.Month, now.Day, now.Hour, now.Minute, 0, now.Offset)
+            };
+            thresholds.TenMinutes = thresholds.Start.AddMinutes(-10);
+            thresholds.End = thresholds.TenMinutes;
+
+            if (thresholds.Start.Minute == 0)
+            {
+                thresholds.OneHour = thresholds.Start.AddHours(-1);
+                thresholds.End = thresholds.OneHour.Value;
+
+                if (thresholds.Start.Hour == 0)
                 {
-                    currentSensorAverages = new AverageTableEntity();
-                    currentSensorAverages.PartitionKey = row.SensorId;
+                    thresholds.OneDay = thresholds.Start.AddDays(-1);
+                    thresholds.End = thresholds.OneDay.Value;
+
+                    if (thresholds.Start.Day == 1)
+                    {
+                        thresholds.OneMonth = thresholds.Start.AddMonths(-1);
+                        thresholds.End = thresholds.OneMonth.Value;
+                    }
                 }
-
-                if (row.SensorId != currentSensorAverages.PartitionKey && sensorEntryCount > 0)
-                {
-                    this.DivideSums(currentSensorAverages, sensorEntryCount);
-                    currentSensorAverages.RowKey = DateTimeOffset.UtcNow.ToString("yyyyMMddHHmmss");
-                    results.Add(currentSensorAverages);
-
-                    currentSensorAverages = new AverageTableEntity();
-                    currentSensorAverages.PartitionKey = row.SensorId;
-                    sensorEntryCount = 0;
-                }
-
-                AppendValues(currentSensorAverages, row);
-                sensorEntryCount++;
             }
 
-            // Add the last average row to the list
-            this.DivideSums(currentSensorAverages, sensorEntryCount);
-            currentSensorAverages.RowKey = DateTimeOffset.UtcNow.ToString("yyyyMMddHHmmss");
-            results.Add(currentSensorAverages);
-
-            return results;
+            return thresholds;
         }
 
-        private void AppendValues(AverageTableEntity sums, SensorDataTableEntity values)
+        private async Task CalculateAveragesAsync(TableServiceClient serviceClient, Thresholds thresholds, ILogger log)
+        {
+            TableClient sensorTable = serviceClient.GetTableClient(Environment.GetEnvironmentVariable("STORAGE_ACCOUNT_SENSOR_TABLE_NAME"));
+            TableClient realTimeTable = serviceClient.GetTableClient(Environment.GetEnvironmentVariable("STORAGE_ACCOUNT_REAL_TIME_TABLE_NAME"));
+
+            var sensors = sensorTable.QueryAsync<SensorTableEntity>();
+            await foreach (var sensor in sensors)
+            {
+                log.LogDebug($"Querying for sensor: {sensor.RowKey}");
+                var sensorData = realTimeTable.QueryAsync<RealTimeTableEntity>(filter: $"PartitionKey eq '{sensor.RowKey}'");
+                var sums = new AverageTableEntity();
+                var rowCount = 0;
+                var currentThreshold = this.GetNextThreshold(thresholds, thresholds.Start);
+                await foreach (var row in sensorData)
+                {
+                    if (!currentThreshold.time.HasValue)
+                    {
+                        break;
+                    }
+
+                    if (row.Timestamp < currentThreshold.time)
+                    {
+                        var averages = this.DivideSums(sums, rowCount);
+                        averages.PartitionKey = sensor.RowKey;
+                        averages.RowKey = string.Format("{0:D19}", DateTime.MaxValue.Ticks - thresholds.Start.Ticks);
+                        averages.Timestamp = thresholds.Start;
+                        TableClient averageTable = serviceClient.GetTableClient(currentThreshold.tableName);
+                        await averageTable.AddEntityAsync(averages);
+                        currentThreshold = this.GetNextThreshold(thresholds, currentThreshold.time.Value);
+                    }
+                    else
+                    {
+                        this.AppendValues(sums, row);
+                        rowCount++;
+                    }
+                }
+            }
+        }
+
+        private (DateTimeOffset? time, string tableName) GetNextThreshold(Thresholds thresholds, DateTimeOffset currentThreshold)
+        {
+            if (currentThreshold == thresholds.Start)
+            {
+                return (thresholds.TenMinutes, Environment.GetEnvironmentVariable("STORAGE_ACCOUNT_TEN_MINUTE_AVERAGES_TABLE_NAME"));
+            }
+
+            if (currentThreshold == thresholds.TenMinutes)
+            {
+                return (thresholds.OneHour, Environment.GetEnvironmentVariable("STORAGE_ACCOUNT_HOURLY_AVERAGES_TABLE_NAME"));
+            }
+
+            if (currentThreshold == thresholds.OneHour)
+            {
+                return (thresholds.OneDay, Environment.GetEnvironmentVariable("STORAGE_ACCOUNT_DAILY_AVERAGES_TABLE_NAME"));
+            }
+
+            if (currentThreshold == thresholds.OneDay)
+            {
+                return (thresholds.OneMonth, Environment.GetEnvironmentVariable("STORAGE_ACCOUNT_MONTHLY_AVERAGES_TABLE_NAME"));
+            }
+
+            return (null, string.Empty);
+        }
+
+        private void AppendValues(AverageTableEntity sums, RealTimeTableEntity values)
         {
             sums.TempFahrenheit += values.CurrentTempFahrenheit;
             sums.Humidity += values.CurrentHumidity;
@@ -93,45 +135,84 @@ namespace SteveSyrell.PurpleAirUploadApi
             sums.DewpointFahrenheit680 += values.CurrentDewpointFahrenheit680;
             sums.Pressure680 += values.Pressure680;
             sums.Gas680 += values.Gas680;
-            sums.Pm25Aqi += (values.ChannelA_Pm25Aqi + values.ChannelB_Pm25Aqi) / 2;
-            sums.Pm10CF1 += (values.ChannelA_Pm10CF1 + values.ChannelB_Pm10CF1) / 2;
-            sums.Pm25CF1 += (values.ChannelA_Pm25CF1 + values.ChannelB_Pm25CF1) / 2;
-            sums.Pm100CF1 += (values.ChannelA_Pm100CF1 + values.ChannelB_Pm100CF1) / 2;
-            sums.P03Um += (values.ChannelA_P03Um + values.ChannelB_P03Um) / 2;
-            sums.P05Um += (values.ChannelA_P05Um + values.ChannelB_P05Um) / 2;
-            sums.P10Um += (values.ChannelA_P10Um + values.ChannelB_P10Um) / 2;
-            sums.P25Um += (values.ChannelA_P25Um + values.ChannelB_P25Um) / 2;
-            sums.P50Um += (values.ChannelA_P50Um + values.ChannelB_P50Um) / 2;
-            sums.P100Um += (values.ChannelA_P100Um + values.ChannelB_P100Um) / 2;
-            sums.Pm10Atm += (values.ChannelA_Pm10Atm + values.ChannelB_Pm10Atm) / 2;
-            sums.Pm25Atm += (values.ChannelA_Pm25Atm + values.ChannelB_Pm25Atm) / 2;
-            sums.Pm100Atm += (values.ChannelA_Pm100Atm + values.ChannelB_Pm100Atm) / 2;
+            sums.ChannelA_Pm25Aqi += values.ChannelA_Pm25Aqi;
+            sums.ChannelA_Pm10CF1 += values.ChannelA_Pm10CF1;
+            sums.ChannelA_Pm25CF1 += values.ChannelA_Pm25CF1;
+            sums.ChannelA_Pm100CF1 += values.ChannelA_Pm100CF1;
+            sums.ChannelA_P03Um += values.ChannelA_P03Um;
+            sums.ChannelA_P05Um += values.ChannelA_P05Um;
+            sums.ChannelA_P10Um += values.ChannelA_P10Um;
+            sums.ChannelA_P25Um += values.ChannelA_P25Um;
+            sums.ChannelA_P50Um += values.ChannelA_P50Um;
+            sums.ChannelA_P100Um += values.ChannelA_P100Um;
+            sums.ChannelA_Pm10Atm += values.ChannelA_Pm10Atm;
+            sums.ChannelA_Pm25Atm += values.ChannelA_Pm25Atm;
+            sums.ChannelA_Pm100Atm += values.ChannelA_Pm100Atm;
+            sums.ChannelB_Pm25Aqi += values.ChannelB_Pm25Aqi;
+            sums.ChannelB_Pm10CF1 += values.ChannelB_Pm10CF1;
+            sums.ChannelB_Pm25CF1 += values.ChannelB_Pm25CF1;
+            sums.ChannelB_Pm100CF1 += values.ChannelB_Pm100CF1;
+            sums.ChannelB_P03Um += values.ChannelB_P03Um;
+            sums.ChannelB_P05Um += values.ChannelB_P05Um;
+            sums.ChannelB_P10Um += values.ChannelB_P10Um;
+            sums.ChannelB_P25Um += values.ChannelB_P25Um;
+            sums.ChannelB_P50Um += values.ChannelB_P50Um;
+            sums.ChannelB_P100Um += values.ChannelB_P100Um;
+            sums.ChannelB_Pm10Atm += values.ChannelB_Pm10Atm;
+            sums.ChannelB_Pm25Atm += values.ChannelB_Pm25Atm;
+            sums.ChannelB_Pm100Atm += values.ChannelB_Pm100Atm;
         }
 
-        private void DivideSums(AverageTableEntity averages, int entryCount)
+        private AverageTableEntity DivideSums(AverageTableEntity averages, int entryCount)
         {
-            averages.TempFahrenheit = averages.TempFahrenheit / entryCount;
-            averages.Humidity = averages.Humidity / entryCount;
-            averages.DewpointFahrenheit = averages.DewpointFahrenheit / entryCount;
-            averages.Pressure = averages.Pressure / entryCount;
-            averages.TempFahrenheit680 = averages.TempFahrenheit680 / entryCount;
-            averages.Humidity680 = averages.Humidity680 / entryCount;
-            averages.DewpointFahrenheit680 = averages.DewpointFahrenheit680 / entryCount;
-            averages.Pressure680 = averages.Pressure680 / entryCount;
-            averages.Gas680 = averages.Gas680 / entryCount;
-            averages.Pm25Aqi = averages.Pm25Aqi / entryCount;
-            averages.Pm10CF1 = averages.Pm10CF1 / entryCount;
-            averages.Pm25CF1 = averages.Pm25CF1 / entryCount;
-            averages.Pm100CF1 = averages.Pm100CF1 / entryCount;
-            averages.P03Um = averages.P03Um / entryCount;
-            averages.P05Um = averages.P05Um / entryCount;
-            averages.P10Um = averages.P10Um / entryCount;
-            averages.P25Um = averages.P25Um / entryCount;
-            averages.P50Um = averages.P50Um / entryCount;
-            averages.P100Um = averages.P100Um / entryCount;
-            averages.Pm10Atm = averages.Pm10Atm / entryCount;
-            averages.Pm25Atm = averages.Pm25Atm / entryCount;
-            averages.Pm100Atm = averages.Pm100Atm / entryCount;
+            var result = averages.Clone();
+            result.TempFahrenheit = result.TempFahrenheit / entryCount;
+            result.Humidity = result.Humidity / entryCount;
+            result.DewpointFahrenheit = result.DewpointFahrenheit / entryCount;
+            result.Pressure = result.Pressure / entryCount;
+            result.TempFahrenheit680 = result.TempFahrenheit680 / entryCount;
+            result.Humidity680 = result.Humidity680 / entryCount;
+            result.DewpointFahrenheit680 = result.DewpointFahrenheit680 / entryCount;
+            result.Pressure680 = result.Pressure680 / entryCount;
+            result.Gas680 = result.Gas680 / entryCount;
+            result.ChannelA_Pm25Aqi = result.ChannelA_Pm25Aqi / entryCount;
+            result.ChannelA_Pm10CF1 = result.ChannelA_Pm10CF1 / entryCount;
+            result.ChannelA_Pm25CF1 = result.ChannelA_Pm25CF1 / entryCount;
+            result.ChannelA_Pm100CF1 = result.ChannelA_Pm100CF1 / entryCount;
+            result.ChannelA_P03Um = result.ChannelA_P03Um / entryCount;
+            result.ChannelA_P05Um = result.ChannelA_P05Um / entryCount;
+            result.ChannelA_P10Um = result.ChannelA_P10Um / entryCount;
+            result.ChannelA_P25Um = result.ChannelA_P25Um / entryCount;
+            result.ChannelA_P50Um = result.ChannelA_P50Um / entryCount;
+            result.ChannelA_P100Um = result.ChannelA_P100Um / entryCount;
+            result.ChannelA_Pm10Atm = result.ChannelA_Pm10Atm / entryCount;
+            result.ChannelA_Pm25Atm = result.ChannelA_Pm25Atm / entryCount;
+            result.ChannelA_Pm100Atm = result.ChannelA_Pm100Atm / entryCount;
+            result.ChannelB_Pm25Aqi = result.ChannelB_Pm25Aqi / entryCount;
+            result.ChannelB_Pm10CF1 = result.ChannelB_Pm10CF1 / entryCount;
+            result.ChannelB_Pm25CF1 = result.ChannelB_Pm25CF1 / entryCount;
+            result.ChannelB_Pm100CF1 = result.ChannelB_Pm100CF1 / entryCount;
+            result.ChannelB_P03Um = result.ChannelB_P03Um / entryCount;
+            result.ChannelB_P05Um = result.ChannelB_P05Um / entryCount;
+            result.ChannelB_P10Um = result.ChannelB_P10Um / entryCount;
+            result.ChannelB_P25Um = result.ChannelB_P25Um / entryCount;
+            result.ChannelB_P50Um = result.ChannelB_P50Um / entryCount;
+            result.ChannelB_P100Um = result.ChannelB_P100Um / entryCount;
+            result.ChannelB_Pm10Atm = result.ChannelB_Pm10Atm / entryCount;
+            result.ChannelB_Pm25Atm = result.ChannelB_Pm25Atm / entryCount;
+            result.ChannelB_Pm100Atm = result.ChannelB_Pm100Atm / entryCount;
+
+            return result;
+        }
+
+        private struct Thresholds
+        {
+            public DateTimeOffset Start { get; set; }
+            public DateTimeOffset End { get; set; }
+            public DateTimeOffset TenMinutes { get; set; }
+            public DateTimeOffset? OneHour { get; set; }
+            public DateTimeOffset? OneDay { get; set; }
+            public DateTimeOffset? OneMonth { get; set; }
         }
     }
 }

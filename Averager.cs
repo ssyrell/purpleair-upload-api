@@ -126,13 +126,13 @@ namespace SteveSyrell.PurpleAirUploadApi
 
         private void AppendValues(AverageTableEntity sums, RealTimeTableEntity values)
         {
-            sums.TempFahrenheit += values.CurrentTempFahrenheit;
-            sums.Humidity += values.CurrentHumidity;
-            sums.DewpointFahrenheit += values.CurrentDewpointFahrenheit;
+            sums.TempFahrenheit += values.TempFahrenheit;
+            sums.Humidity += values.Humidity;
+            sums.DewpointFahrenheit += values.DewpointFahrenheit;
             sums.Pressure += values.Pressure;
-            sums.TempFahrenheit680 += values.CurrentTempFahrenheit680;
-            sums.Humidity680 += values.CurrentHumidity680;
-            sums.DewpointFahrenheit680 += values.CurrentDewpointFahrenheit680;
+            sums.TempFahrenheit680 += values.TempFahrenheit680;
+            sums.Humidity680 += values.Humidity680;
+            sums.DewpointFahrenheit680 += values.DewpointFahrenheit680;
             sums.Pressure680 += values.Pressure680;
             sums.Gas680 += values.Gas680;
             sums.ChannelA_Pm25Aqi += values.ChannelA_Pm25Aqi;

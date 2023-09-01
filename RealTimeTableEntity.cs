@@ -73,25 +73,25 @@ namespace SteveSyrell.PurpleAirUploadApi
         public string HardwareDiscovered { get; set; }
 
         [JsonPropertyName("current_temp_f")]
-        public double CurrentTempFahrenheit { get; set; }
+        public double TempFahrenheit { get; set; }
 
         [JsonPropertyName("current_humidity")]
-        public double CurrentHumidity { get; set; }
+        public double Humidity { get; set; }
 
         [JsonPropertyName("current_dewpoint_f")]
-        public double CurrentDewpointFahrenheit { get; set; }
+        public double DewpointFahrenheit { get; set; }
 
         [JsonPropertyName("pressure")]
         public double Pressure { get; set; }
 
         [JsonPropertyName("current_temp_f_680")]
-        public double CurrentTempFahrenheit680 { get; set; }
+        public double TempFahrenheit680 { get; set; }
 
         [JsonPropertyName("current_humidity_680")]
-        public double CurrentHumidity680 { get; set; }
+        public double Humidity680 { get; set; }
 
         [JsonPropertyName("current_dewpoint_f_680")]
-        public double CurrentDewpointFahrenheit680 { get; set; }
+        public double DewpointFahrenheit680 { get; set; }
 
         [JsonPropertyName("pressure_680")]
         public double Pressure680 { get; set; }

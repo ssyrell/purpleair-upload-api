@@ -20,24 +20,20 @@ namespace SteveSyrell.PurpleAirUploadApi
             ILogger log)
         {
             log.LogInformation("[RealTime] Begin processing upload request");
-            var now = DateTime.UtcNow;
+            var utilities = new Utilities();
 
             string requestBody = await new StreamReader(req.Body).ReadToEndAsync();
             var data = JsonSerializer.Deserialize<RealTimeTableEntity>(requestBody);
             log.LogInformation($"[RealTime] Received upload request for sensor {data.SensorId}");
 
-            // Order table rows using long tail pattern to allow
-            // for efficient fetching of most recent 'x' rows so
-            // that we can quickly average data.
-            var invertedTicks = string.Format("{0:D19}", DateTime.MaxValue.Ticks - now.Ticks);
             data.PartitionKey = data.SensorId;
-            data.RowKey = invertedTicks;
+            data.RowKey = utilities.GenerateRowKey();
 
             TableServiceClient tableServiceClient = new TableServiceClient(Environment.GetEnvironmentVariable("STORAGE_ACCOUNT_CONNECTION_STRING"));
             TableClient realTimeTable = tableServiceClient.GetTableClient(Environment.GetEnvironmentVariable("STORAGE_ACCOUNT_REAL_TIME_TABLE_NAME"));
 
             await realTimeTable.AddEntityAsync(data);
-            log.LogInformation($"[RealTime] Completed processing upload request for sensor {data.SensorId}. Total processing time: {(DateTime.UtcNow - now).TotalMilliseconds}ms");
+            log.LogInformation($"[RealTime] Completed processing upload request for sensor {data.SensorId}.");
 
             return new OkResult();
         }

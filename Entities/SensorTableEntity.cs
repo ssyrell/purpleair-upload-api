@@ -2,7 +2,7 @@ using System;
 using Azure;
 using Azure.Data.Tables;
 
-namespace SteveSyrell.PurpleAirUploadApi
+namespace SteveSyrell.PurpleAirUploadApi.Entities
 {
     public class SensorTableEntity : ITableEntity
     {

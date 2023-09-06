@@ -4,7 +4,7 @@ using Azure;
 using Azure.Data.Tables;
 
 
-namespace SteveSyrell.PurpleAirUploadApi
+namespace SteveSyrell.PurpleAirUploadApi.Entities
 {
     public record RealTimeTableEntity : ITableEntity
     {

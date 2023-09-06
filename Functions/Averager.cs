@@ -1,11 +1,9 @@
 using System;
-using System.Collections.Generic;
 using System.Threading.Tasks;
-using Azure;
 using Azure.Data.Tables;
 using Microsoft.Azure.WebJobs;
 using Microsoft.Extensions.Logging;
-using Microsoft.WindowsAzure.Storage.Table;
+using SteveSyrell.PurpleAirUploadApi.Entities;
 
 namespace SteveSyrell.PurpleAirUploadApi
 {
@@ -22,45 +20,15 @@ namespace SteveSyrell.PurpleAirUploadApi
         [FunctionName("Averager")]
         public async Task Run([TimerTrigger("0 */10 * * * *")] TimerInfo myTimer, ILogger log)
         {
-            var thresholds = this.GetThresholds();
+            var utilities = new Utilities();
+            var thresholds = utilities.CalculateAveragerThresholds(DateTimeOffset.UtcNow);
             log.LogInformation($"[Averager] Calculating averages from {thresholds.End} to {thresholds.Start}.");
 
             TableServiceClient tableServiceClient = new TableServiceClient(Environment.GetEnvironmentVariable("STORAGE_ACCOUNT_CONNECTION_STRING"));
             await this.CalculateAveragesAsync(tableServiceClient, thresholds, log);
         }
 
-        private Thresholds GetThresholds()
-        {
-            var now = DateTimeOffset.UtcNow;
-            var thresholds = new Thresholds
-            {
-                Start = new DateTimeOffset(now.Year, now.Month, now.Day, now.Hour, now.Minute, 0, now.Offset)
-            };
-            thresholds.TenMinutes = thresholds.Start.AddMinutes(-10);
-            thresholds.End = thresholds.TenMinutes;
-
-            if (thresholds.Start.Minute == 0)
-            {
-                thresholds.OneHour = thresholds.Start.AddHours(-1);
-                thresholds.End = thresholds.OneHour.Value;
-
-                if (thresholds.Start.Hour == 0)
-                {
-                    thresholds.OneDay = thresholds.Start.AddDays(-1);
-                    thresholds.End = thresholds.OneDay.Value;
-
-                    if (thresholds.Start.Day == 1)
-                    {
-                        thresholds.OneMonth = thresholds.Start.AddMonths(-1);
-                        thresholds.End = thresholds.OneMonth.Value;
-                    }
-                }
-            }
-
-            return thresholds;
-        }
-
-        private async Task CalculateAveragesAsync(TableServiceClient serviceClient, Thresholds thresholds, ILogger log)
+        private async Task CalculateAveragesAsync(TableServiceClient serviceClient, AveragerThresholds thresholds, ILogger log)
         {
             TableClient sensorTable = serviceClient.GetTableClient(Environment.GetEnvironmentVariable("STORAGE_ACCOUNT_SENSOR_TABLE_NAME"));
             TableClient realTimeTable = serviceClient.GetTableClient(Environment.GetEnvironmentVariable("STORAGE_ACCOUNT_REAL_TIME_TABLE_NAME"));
@@ -99,7 +67,7 @@ namespace SteveSyrell.PurpleAirUploadApi
             }
         }
 
-        private (DateTimeOffset? time, string tableName) GetNextThreshold(Thresholds thresholds, DateTimeOffset currentThreshold)
+        private (DateTimeOffset? time, string tableName) GetNextThreshold(AveragerThresholds thresholds, DateTimeOffset currentThreshold)
         {
             if (currentThreshold == thresholds.Start)
             {
@@ -203,16 +171,6 @@ namespace SteveSyrell.PurpleAirUploadApi
             result.ChannelB_Pm100Atm = result.ChannelB_Pm100Atm / entryCount;
 
             return result;
-        }
-
-        private struct Thresholds
-        {
-            public DateTimeOffset Start { get; set; }
-            public DateTimeOffset End { get; set; }
-            public DateTimeOffset TenMinutes { get; set; }
-            public DateTimeOffset? OneHour { get; set; }
-            public DateTimeOffset? OneDay { get; set; }
-            public DateTimeOffset? OneMonth { get; set; }
         }
     }
 }

@@ -1,0 +1,19 @@
+name: "Unit Tests"
+env:
+  DOTNET_VERSION: "6.0.x"
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  tests:
+    name: Run XUnit UTs
+    runs-on: windows-latest
+    steps:
+      - name: "Checkout GitHub Action"
+        uses: actions/checkout@v3
+      - name: Setup DotNet ${{ env.DOTNET_VERSION }} Environment
+        uses: actions/setup-dotnet@v3
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+      - run: dotnet test
